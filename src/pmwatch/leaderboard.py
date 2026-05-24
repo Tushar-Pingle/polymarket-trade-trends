@@ -79,7 +79,15 @@ def rank_niche(
         try:
             scores.append(score_wallet(client, wallet=wallet, niche=niche.key, cfg=cfg.leaderboard, now=now))
         except Exception as exc:  # one bad wallet must not abort the whole run
-            log.warning("Failed to score wallet", extra={"extra_fields": {"wallet": wallet, "error": str(exc)}})
+            # Include the error in the message itself so it's visible regardless
+            # of whether logging is in plain-text or JSON mode.
+            log.warning(
+                "Failed to score wallet %s: %s: %s",
+                wallet,
+                type(exc).__name__,
+                exc,
+                extra={"extra_fields": {"wallet": wallet, "error": str(exc)}},
+            )
 
     # Highest composite score first; this single sort drives promotion/demotion.
     scores.sort(key=lambda s: s.score, reverse=True)

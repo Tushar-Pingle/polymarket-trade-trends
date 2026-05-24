@@ -23,11 +23,29 @@ from enum import StrEnum
 from typing import Any
 
 
-def _to_utc(unix_seconds: float | int | str | None) -> datetime | None:
-    """Convert Unix epoch seconds (as int/float/str) to aware UTC datetime."""
-    if unix_seconds is None or unix_seconds == "":
+def _to_utc(value: float | int | str | None) -> datetime | None:
+    """Parse a timestamp into an aware UTC datetime, tolerating both formats
+    Polymarket uses: Unix epoch seconds (int/float/numeric-string, as ``/trades``
+    and ``/activity`` return) AND ISO-8601 strings (as ``/positions`` returns for
+    ``endDate``). Anything unparseable yields ``None`` rather than raising, so a
+    single odd row can never abort scoring of an entire wallet."""
+    if value is None or value == "":
         return None
-    return datetime.fromtimestamp(float(unix_seconds), tz=UTC)
+    # Native numeric -> Unix epoch seconds.
+    if isinstance(value, (int, float)):
+        return datetime.fromtimestamp(float(value), tz=UTC)
+    text = str(value).strip()
+    # Numeric string (e.g. "1730808000") -> Unix epoch seconds.
+    try:
+        return datetime.fromtimestamp(float(text), tz=UTC)
+    except ValueError:
+        pass
+    # Otherwise treat as ISO-8601 (tolerate a trailing "Z").
+    try:
+        dt = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        return dt if dt.tzinfo else dt.replace(tzinfo=UTC)
+    except ValueError:
+        return None
 
 
 def _norm_addr(address: str | None) -> str:
