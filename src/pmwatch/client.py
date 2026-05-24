@@ -32,7 +32,7 @@ import requests
 
 from .config import ApiConfig
 from .logging_conf import get_logger
-from .models import Market, Position, Trade
+from .models import Event, Market, Position, Trade
 
 log = get_logger(__name__)
 
@@ -214,6 +214,34 @@ class PolymarketClient:
         raw = self._get(self._api.gamma_base_url, "/markets", params)
         rows = _ensure_list(raw)
         return Market.from_api(rows[0]) if rows else None
+
+    def get_events(
+        self,
+        *,
+        limit: int = 100,
+        offset: int = 0,
+        closed: bool = False,
+        order: str = "volume",
+        ascending: bool = False,
+    ) -> list[Event]:
+        """A page of events (the category-bearing objects), used for discovery.
+
+        ``GET /events?closed=&order=&ascending=&limit=&offset=``. Events carry the
+        real category **tags** (a market's own top-level tags come back empty) and
+        bundle their markets, so niche discovery is driven from here. Gamma caps
+        ``limit`` at 100, so callers paginate via ``offset``. We pass ``order`` for
+        convenience but also sort by volume locally, so discovery is correct even
+        if the server-side sort is ignored.
+        """
+        params = {
+            "closed": str(closed).lower(),
+            "order": order,
+            "ascending": str(ascending).lower(),
+            "limit": limit,
+            "offset": offset,
+        }
+        raw = self._get(self._api.gamma_base_url, "/events", params)
+        return [Event.from_api(row) for row in _ensure_list(raw)]
 
 
 def _ensure_list(raw: Any) -> list[Any]:

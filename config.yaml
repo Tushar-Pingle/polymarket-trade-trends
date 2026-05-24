@@ -87,6 +87,7 @@ leaderboard:
 discovery:
   markets_per_niche: 15        # top markets (by volume) sampled per niche
   holders_per_market: 50       # top holders pulled per market as candidates
+  event_pages: 6               # 100-event pages scanned to find a niche's markets
 
 # ---------------------------------------------------------------------------
 # The niches ("baskets"). gamma_tags are matched (case-insensitive) against a

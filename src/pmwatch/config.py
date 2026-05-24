@@ -140,6 +140,7 @@ class LeaderboardConfig:
 class DiscoveryConfig:
     markets_per_niche: int
     holders_per_market: int
+    event_pages: int
 
 
 @dataclass(frozen=True)
@@ -339,6 +340,7 @@ def _parse_discovery(raw: dict[str, Any]) -> DiscoveryConfig:
     return DiscoveryConfig(
         markets_per_niche=_as_int(raw.get("markets_per_niche", 15), "discovery.markets_per_niche"),
         holders_per_market=_as_int(raw.get("holders_per_market", 50), "discovery.holders_per_market"),
+        event_pages=_as_int(raw.get("event_pages", 6), "discovery.event_pages"),
     )
 
 
