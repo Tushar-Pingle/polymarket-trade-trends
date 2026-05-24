@@ -208,6 +208,54 @@ class Market:
 
 
 @dataclass(frozen=True)
+class Event:
+    """A Gamma *event* — the category-bearing object that groups related markets.
+
+    Crucially, the category **tags** (e.g. "Politics", "Crypto", "Soccer") live on
+    the event, not on the individual market (a market's top-level ``tags`` come
+    back empty from ``/markets``). Each event also bundles its markets, from which
+    we take ``conditionId`` for the holders lookup. ``tags`` here is a flat,
+    lower-cased list of every tag label *and* slug, so niche matching can do a
+    simple case-insensitive substring test.
+    """
+
+    event_id: str
+    title: str
+    slug: str
+    volume: float
+    tags: list[str]  # lower-cased tag labels + slugs
+    market_condition_ids: list[str]
+
+    @classmethod
+    def from_api(cls, raw: dict[str, Any]) -> Event:
+        # Flatten every tag's label and slug into one lower-cased term list.
+        tag_terms: list[str] = []
+        for tag in raw.get("tags") or []:
+            if isinstance(tag, dict):
+                for key in ("label", "slug"):
+                    value = tag.get(key)
+                    if value:
+                        tag_terms.append(str(value).lower())
+
+        # Collect condition ids of this event's markets (skip blanks).
+        condition_ids: list[str] = []
+        for market in raw.get("markets") or []:
+            if isinstance(market, dict):
+                cid = market.get("conditionId")
+                if cid:
+                    condition_ids.append(str(cid))
+
+        return cls(
+            event_id=str(raw.get("id", "")),
+            title=str(raw.get("title", "")),
+            slug=str(raw.get("slug", "")),
+            volume=float(raw.get("volume", 0) or 0),
+            tags=tag_terms,
+            market_condition_ids=condition_ids,
+        )
+
+
+@dataclass(frozen=True)
 class WalletScore:
     """A wallet's computed standing within one niche (output of the ranker)."""
 

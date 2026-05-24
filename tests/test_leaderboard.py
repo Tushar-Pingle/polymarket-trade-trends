@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 
-from conftest import EPOCH, FakeClient, make_market, make_position
+from conftest import EPOCH, FakeClient, make_event, make_position
 from pmwatch.leaderboard import rank_niche
 from pmwatch.ledger import Ledger
 
@@ -16,10 +16,11 @@ def _small_board_cfg(cfg):
 
 
 def _client(positions: dict[str, list]) -> FakeClient:
-    market = make_market("m1", tags=["Politics"])
+    # A politics-tagged event whose single market's holders are our candidates.
+    event = make_event("e1", tags=["Politics"], condition_ids=["m1"])
     return FakeClient(
         positions=positions,
-        markets=[market],
+        events=[event],
         holders={"m1": ["0xw1", "0xw2", "0xw3", "0xw4"]},
     )
 

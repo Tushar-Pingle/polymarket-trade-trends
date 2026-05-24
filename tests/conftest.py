@@ -17,7 +17,7 @@ from pathlib import Path
 import pytest
 
 from pmwatch.config import Config, load_config
-from pmwatch.models import Market, Position, Side, Trade, WalletScore
+from pmwatch.models import Event, Market, Position, Side, Trade, WalletScore
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 EPOCH = datetime(2026, 1, 1, tzinfo=UTC)
@@ -119,11 +119,13 @@ class FakeClient:
         activity: dict[str, list[Trade]] | None = None,
         markets: list[Market] | None = None,
         holders: dict[str, list[str]] | None = None,
+        events: list[Event] | None = None,
     ) -> None:
         self._positions = positions or {}
         self._activity = activity or {}
         self._markets = markets or []
         self._holders = holders or {}
+        self._events = events or []
 
     def get_positions(self, wallet: str, *, limit: int = 500) -> list[Position]:
         return list(self._positions.get(wallet.lower(), []))
@@ -136,6 +138,10 @@ class FakeClient:
 
     def get_holders(self, condition_id: str, *, limit: int = 50) -> list[str]:
         return list(self._holders.get(condition_id, []))
+
+    def get_events(self, *, limit=100, offset=0, closed=False, order="volume", ascending=False) -> list[Event]:
+        # Mimic Gamma's offset pagination over the configured event list.
+        return list(self._events[offset : offset + limit])
 
     def get_market(self, condition_id: str) -> Market | None:
         for m in self._markets:
@@ -154,4 +160,23 @@ def make_market(condition_id: str, *, tags: list[str], price: float = 0.5) -> Ma
         volume=1_000_000.0,
         closed=False,
         tags=tags,
+    )
+
+
+def make_event(
+    event_id: str,
+    *,
+    tags: list[str],
+    condition_ids: list[str],
+    volume: float = 1_000_000.0,
+    title: str = "",
+) -> Event:
+    """Build an Event with lower-cased tags (as the real parser produces)."""
+    return Event(
+        event_id=event_id,
+        title=title,
+        slug=event_id,
+        volume=volume,
+        tags=[t.lower() for t in tags],
+        market_condition_ids=condition_ids,
     )

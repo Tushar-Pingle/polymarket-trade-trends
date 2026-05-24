@@ -2,14 +2,17 @@
 
 Before we can score and rank leaders, we need a pool of plausible candidates for
 each niche. Polymarket has no "who's good at Politics" endpoint, so we bootstrap
-it from public data:
+it from public data — but the *right* way, learned from inspecting the live API:
 
-1. Pull the highest-volume markets from the Gamma API.
-2. Keep the ones whose tags/category match the niche (e.g. "Politics").
-3. For each, ask the Data API for that market's **top holders** — the wallets
-   with the largest positions are exactly the active, high-conviction players we
-   want to evaluate.
-4. De-duplicate the union of holders into a candidate list.
+* A market's own top-level ``tags`` come back empty from ``/markets``. The real
+  category tags live on the **event** that groups related markets. So we iterate
+  ``/events`` (which carry ``tags`` and bundle their markets).
+* Gamma caps a page at 100 and its server-side volume sort is unreliable, so we
+  **paginate via ``offset``** and **sort by volume locally**.
+* For each event whose tags match the niche, we take its markets' condition ids,
+  keep the highest-volume ones, and pull each market's **top holders** — the
+  wallets with the largest positions are exactly the active, high-conviction
+  players we want to evaluate.
 
 These candidates then flow into :mod:`pmwatch.score` and :mod:`pmwatch.leaderboard`,
 which decide which of them actually earn a spot on the board.
@@ -20,20 +23,21 @@ from __future__ import annotations
 from .client import PolymarketClient
 from .config import DiscoveryConfig, Niche
 from .logging_conf import get_logger
-from .models import Market
+from .models import Event
 
 log = get_logger(__name__)
 
 
-def market_matches_niche(market: Market, niche: Niche) -> bool:
-    """True if a market's tags/category match any of the niche's tags.
+def event_matches_niche(event: Event, niche: Niche) -> bool:
+    """True if an event's tags (or title) match any of the niche's tags.
 
-    Matching is case-insensitive and substring-based so "US Politics" matches a
-    "Politics" niche tag and vice-versa. The question text is also checked as a
-    fallback because Gamma tag coverage is uneven across markets.
+    Matching is case-insensitive and substring-based against the event's flattened
+    tag labels/slugs, with the event title as a fallback. So a niche tag of
+    "Politics" matches an event tagged "US Politics", and "Crypto" matches a
+    "crypto" slug, etc.
     """
-    haystay = " ".join(market.tags).lower() + " " + market.question.lower()
-    return any(tag.lower() in haystay for tag in niche.gamma_tags)
+    haystack = " ".join(event.tags) + " " + event.title.lower()
+    return any(tag.lower() in haystack for tag in niche.gamma_tags)
 
 
 def discover_candidates(
@@ -41,34 +45,46 @@ def discover_candidates(
     niche: Niche,
     cfg: DiscoveryConfig,
     *,
-    market_pool: int = 200,
+    event_pages: int | None = None,
 ) -> list[str]:
     """Return de-duplicated candidate wallet addresses for a niche.
 
     Parameters
     ----------
-    market_pool:
-        How many top-volume markets to scan before filtering to the niche. A
-        larger pool finds more niche markets at the cost of more Gamma calls.
+    event_pages:
+        How many 100-event pages to scan before filtering to the niche. Defaults
+        to ``cfg.event_pages``. More pages find more niche markets at the cost of
+        more Gamma calls.
     """
-    # Scan a broad pool of high-volume markets, then keep the niche's.
-    top_markets = client.get_top_markets(limit=market_pool, closed=False)
-    niche_markets = [m for m in top_markets if market_matches_niche(m, niche)]
-    niche_markets = niche_markets[: cfg.markets_per_niche]
+    pages = event_pages if event_pages is not None else cfg.event_pages
+
+    # Page through active events, keeping those that belong to this niche.
+    matched: list[Event] = []
+    for page in range(pages):
+        events = client.get_events(limit=100, offset=page * 100, closed=False)
+        if not events:
+            break  # ran past the end of the event list
+        matched.extend(e for e in events if event_matches_niche(e, niche))
+
+    # Highest-volume events first (local sort; don't trust server-side ordering).
+    matched.sort(key=lambda e: e.volume, reverse=True)
+
+    # Flatten to a de-duplicated, volume-prioritised list of market condition ids.
+    condition_ids: list[str] = []
+    for event in matched:
+        condition_ids.extend(event.market_condition_ids)
+    condition_ids = list(dict.fromkeys(condition_ids))[: cfg.markets_per_niche]
 
     log.info(
         "Discovered niche markets",
-        extra={"extra_fields": {"niche": niche.key, "matched": len(niche_markets)}},
+        extra={"extra_fields": {"niche": niche.key, "events": len(matched), "markets": len(condition_ids)}},
     )
 
+    # The top holders of those markets are our candidate leaders.
     candidates: list[str] = []
-    for market in niche_markets:
-        if not market.condition_id:
-            continue
-        holders = client.get_holders(market.condition_id, limit=cfg.holders_per_market)
-        candidates.extend(holders)
+    for condition_id in condition_ids:
+        candidates.extend(client.get_holders(condition_id, limit=cfg.holders_per_market))
 
-    # Preserve discovery order while de-duplicating.
     unique = list(dict.fromkeys(candidates))
     log.info(
         "Collected candidate wallets",
