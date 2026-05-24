@@ -1,0 +1,11 @@
+# ---------------------------------------------------------------------------
+# Runtime dependencies. Pinned to compatible lower bounds.
+#
+# For development (linter, formatter, type checker, tests) install the extras
+# defined in pyproject.toml instead:
+#
+#     pip install -e ".[dev]"
+# ---------------------------------------------------------------------------
+requests>=2.31.0          # HTTP client for the public Polymarket Data + Gamma APIs
+PyYAML>=6.0.1             # config.yaml parsing
+python-dotenv>=1.0.0      # load DISCORD_WEBHOOK_URL (and friends) from .env
