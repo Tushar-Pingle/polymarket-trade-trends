@@ -1,0 +1,52 @@
+# OPTIONAL: weekly leaderboard re-rank in CI as a backup to the server cron.
+#
+# This job DOES reach out to the Polymarket public APIs and commits the refreshed
+# leaderboard JSON back to the repo. Enable it only if you want CI (rather than
+# your server) to own the weekly re-rank. It requires:
+#   * the GitHub Actions runner to have outbound access to *.polymarket.com
+#   * (optional) a DISCORD_WEBHOOK_URL repository secret to post the weekly report
+#
+# It is scheduled but also runnable on demand via the "Run workflow" button.
+name: Weekly rank
+
+on:
+  schedule:
+    - cron: "15 6 * * 1" # Mondays 06:15 UTC
+  workflow_dispatch: {}
+
+# Allow the job to push the regenerated data/ JSON back to the branch.
+permissions:
+  contents: write
+
+jobs:
+  rank:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - run: |
+          python -m pip install --upgrade pip
+          pip install -e .
+
+      - name: Rebuild leaderboards
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+        run: |
+          python -m pmwatch.cli rank --all
+          # Post the weekly comparison only if a webhook secret is configured.
+          if [ -n "${DISCORD_WEBHOOK_URL}" ]; then python -m pmwatch.cli report; fi
+
+      - name: Commit refreshed leaderboard
+        run: |
+          if [ -n "$(git status --porcelain data/)" ]; then
+            git config user.name "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            git add data/
+            git commit -m "chore(leaderboard): weekly re-rank $(date -u +%G-W%V)"
+            git push
+          fi

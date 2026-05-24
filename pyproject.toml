@@ -1,0 +1,78 @@
+# ===========================================================================
+# Packaging + tooling configuration for the pmwatch project.
+#
+# We use a "src layout" (code under src/pmwatch) which prevents accidental
+# imports of the in-tree package before it's installed and keeps tests honest.
+# Install editable for development:  pip install -e .
+# ===========================================================================
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pmwatch"
+version = "0.1.0"
+description = "Read-only Polymarket leader-wallet consensus watcher with Discord alerts and an in-house leaderboard."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "requests>=2.31.0",
+    "PyYAML>=6.0.1",
+    "python-dotenv>=1.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+    "responses>=0.25.0",
+    "ruff>=0.5.0",
+    "black>=24.0.0",
+    "mypy>=1.10.0",
+    "types-requests>=2.31.0",
+    "types-PyYAML>=6.0.0",
+]
+
+[project.scripts]
+# Lets you run `pmwatch ...` instead of `python -m pmwatch.cli ...` once installed.
+pmwatch = "pmwatch.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+# --------------------------------------------------------------------------- #
+# Linting / formatting / typing / tests.
+# --------------------------------------------------------------------------- #
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+# A pragmatic, not-overbearing rule set: pyflakes, pycodestyle, isort,
+# bugbear, comprehensions, pyupgrade.
+select = ["E", "F", "W", "I", "B", "C4", "UP"]
+ignore = ["E501"]  # line length is handled by black/line-length above
+
+[tool.black]
+line-length = 120
+target-version = ["py311"]
+
+[tool.mypy]
+python_version = "3.11"
+packages = ["pmwatch"]
+mypy_path = "src"
+warn_unused_ignores = true
+warn_redundant_casts = true
+no_implicit_optional = true
+check_untyped_defs = true
+disallow_untyped_defs = true
+
+[[tool.mypy.overrides]]
+# responses has no bundled stubs; don't fail typing on the test dependency.
+module = ["responses"]
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+addopts = "-q"

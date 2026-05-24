@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Virtual environments
+venv/
+.venv/
+env/
+
+# Secrets — NEVER commit the real webhook URL
+.env
+
+# Server-local runtime state (SQLite dedup / consensus windows). This is
+# ephemeral and machine-specific, so it is intentionally NOT versioned. The
+# durable analytics under data/ ARE committed (see ARCHITECTURE.md).
+var/
+*.sqlite
+*.sqlite-journal
+
+# OS / editor noise
+.DS_Store
+.idea/
+.vscode/

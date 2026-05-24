@@ -1,0 +1,130 @@
+# ===========================================================================
+# Polymarket consensus-watch configuration.
+#
+# Every tunable lives here so behaviour can change without touching code.
+# The file is loaded and STRICTLY VALIDATED at startup by src/pmwatch/config.py
+# (unknown keys and bad types fail fast with a clear error).
+#
+# All monetary values are in USD. All durations are explicit (hours/seconds/days).
+# ===========================================================================
+
+# ---------------------------------------------------------------------------
+# Polymarket public API endpoints (no authentication required — read only).
+# ---------------------------------------------------------------------------
+api:
+  data_base_url: "https://data-api.polymarket.com"
+  gamma_base_url: "https://gamma-api.polymarket.com"
+  timeout_seconds: 15          # per-request timeout
+  max_retries: 4               # retries on network / 5xx / 429 (exponential backoff)
+  rate_limit_per_sec: 5.0      # shared across ALL workers via a token-bucket limiter
+
+# ---------------------------------------------------------------------------
+# Discord delivery. The webhook URL itself lives in the environment (.env),
+# referenced here only by variable name so no secret is ever committed.
+# ---------------------------------------------------------------------------
+discord:
+  webhook_env: "DISCORD_WEBHOOK_URL"
+  error_webhook_env: "DISCORD_ERROR_WEBHOOK_URL"   # falls back to webhook_env if unset
+  username: "Polymarket Leader Watch"
+
+# ---------------------------------------------------------------------------
+# Alerting behaviour. We emit a SINGLE-leader alert on every tracked bet AND
+# escalate to a CONSENSUS alert when enough leaders converge. Colours are
+# Discord embed colours encoded as decimal integers (0xRRGGBB -> base 10).
+# ---------------------------------------------------------------------------
+alerts:
+  min_trade_size_usd: 1.0      # ignore dust trades below this notional
+
+  single:
+    enabled: true              # alert on every individual tracked-leader bet
+    # A single bet from a top-ranked wallet is far more actionable than one from
+    # the #10 wallet. Bets from wallets ranked at-or-above this number use the
+    # "warning" colour (act now); lower ranks use the "muted" colour (wait/watch).
+    high_rank_threshold: 3
+
+  consensus:
+    min_wallets: 3             # N distinct leaders on the same market+outcome -> consensus
+    window_hours: 24           # rolling window in which those N bets must occur
+    escalation_step: 2         # re-alert an existing event when this many MORE leaders join
+    alert_on_sell: true        # also fire a consensus alert on coordinated SELLs (exit signal)
+
+  # Discord embed colours per conviction tier (decimal form of 0xRRGGBB).
+  colors:
+    muted: 9807270             # 0x95a5a6  grey   — single, low rank
+    warning: 16766720          # 0xffd700  gold   — single, high rank
+    strong: 15105570           # 0xe67e22  orange — consensus (>= min_wallets)
+    max: 15158332              # 0xe74c3c  red    — strong consensus (>= 5) / exit
+    info: 3447003              # 0x3498db  blue   — weekly report
+    error: 9109504             # 0x8b0000  dark red — health/error alerts
+
+# ---------------------------------------------------------------------------
+# Live watcher polling. Each per-niche worker polls its tracked wallets on
+# this interval. Keep interval * wallets * niches comfortably under the API
+# rate limit (the shared limiter enforces this regardless).
+# ---------------------------------------------------------------------------
+poll:
+  interval_seconds: 20
+  trades_limit: 100            # how many recent trades to pull per wallet per poll
+
+# ---------------------------------------------------------------------------
+# In-house leaderboard scoring (recomputed weekly). Points accumulate per
+# wallet from resolved-market history; recent behaviour is weighted more
+# heavily via exponential time-decay.
+# ---------------------------------------------------------------------------
+leaderboard:
+  board_size: 10               # "the board" = top N actively followed per niche
+  bench_size: 40               # retained beyond the board; can climb back on
+  decay_half_life_days: 30     # older trades contribute exponentially less
+  scoring:
+    win_points: 10.0           # per profitable resolved position
+    loss_points: -8.0          # per losing resolved position
+    dump_penalty: -15.0        # per detected pre-resolution dump (see signals.py)
+    roi_weight: 20.0           # multiplied by net ROI fraction and added
+
+# ---------------------------------------------------------------------------
+# Wallet discovery: how candidates are sourced before scoring.
+# ---------------------------------------------------------------------------
+discovery:
+  markets_per_niche: 15        # top markets (by volume) sampled per niche
+  holders_per_market: 50       # top holders pulled per market as candidates
+
+# ---------------------------------------------------------------------------
+# The niches ("baskets"). gamma_tags are matched (case-insensitive) against a
+# market's tags/category to bucket markets into a niche during discovery.
+# ---------------------------------------------------------------------------
+niches:
+  politics:
+    display_name: "Politics / Elections"
+    gamma_tags: ["Politics", "Elections", "US Politics", "Geopolitics"]
+  crypto:
+    display_name: "Crypto"
+    gamma_tags: ["Crypto", "Bitcoin", "Ethereum"]
+  sports:
+    display_name: "Sports"
+    gamma_tags: ["Sports", "NFL", "NBA", "Soccer", "MLB"]
+  weather:
+    display_name: "Weather / Temperature"
+    gamma_tags: ["Weather", "Temperature", "Climate"]
+
+# ---------------------------------------------------------------------------
+# Storage locations.
+#   sqlite_path -> server-local, ephemeral runtime state (gitignored)
+#   data_dir    -> committed, versioned leaderboard + weekly history (JSON)
+# ---------------------------------------------------------------------------
+storage:
+  sqlite_path: "./var/pmwatch.sqlite"
+  data_dir: "./data"
+
+# ---------------------------------------------------------------------------
+# Logging. level is a standard logging level name; json=true emits one JSON
+# object per line (handy for shipping to a log aggregator on your server).
+# ---------------------------------------------------------------------------
+logging:
+  level: "INFO"
+  json: false
+
+# ---------------------------------------------------------------------------
+# Optional friendly names for wallets (address -> alias) shown in alerts.
+# Addresses are lower-cased before lookup.
+# ---------------------------------------------------------------------------
+wallet_aliases: {}

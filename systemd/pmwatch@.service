@@ -1,0 +1,39 @@
+# ===========================================================================
+# Templated systemd unit — one instance per niche, giving you the four
+# independent watcher processes. Install (as root), adjusting User/paths:
+#
+#   sudo cp systemd/pmwatch@.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now pmwatch@politics pmwatch@crypto pmwatch@sports pmwatch@weather
+#
+# Inspect / follow logs:
+#   systemctl status pmwatch@politics
+#   journalctl -u pmwatch@crypto -f
+#
+# The "%i" specifier is the text after the @ (the niche key).
+# ===========================================================================
+[Unit]
+Description=Polymarket leader watcher (%i niche)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Adjust these three to your deployment:
+User=pmwatch
+WorkingDirectory=/opt/polymarket-trade-trends
+ExecStart=/opt/polymarket-trade-trends/scripts/run_watch.sh %i
+
+# Restart on failure with a small backoff; the loop is resilient but a crash
+# (e.g. OOM) should self-heal.
+Restart=on-failure
+RestartSec=10
+
+# The watcher is read-only and needs no elevated privileges; lock it down.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=read-only
+
+[Install]
+WantedBy=multi-user.target
