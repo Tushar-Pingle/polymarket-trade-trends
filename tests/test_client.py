@@ -9,7 +9,14 @@ from __future__ import annotations
 import threading
 import time
 
-from pmwatch.client import FileLockRateLimiter
+from conftest import PROJECT_ROOT, make_position
+from pmwatch.client import FileLockRateLimiter, PolymarketClient
+from pmwatch.config import load_config
+
+
+def _client() -> PolymarketClient:
+    cfg = load_config(PROJECT_ROOT / "config.yaml", load_env=False)
+    return PolymarketClient(cfg.api)
 
 
 def test_file_lock_limiter_caps_combined_throughput(tmp_path) -> None:
@@ -56,3 +63,49 @@ def test_file_lock_limiter_resets_when_stale(tmp_path) -> None:
     start = time.monotonic()
     limiter.acquire()
     assert time.monotonic() - start < 0.5
+
+
+# --------------------------------------------------------------------------- #
+# Pagination
+# --------------------------------------------------------------------------- #
+def test_get_all_positions_assembles_pages_and_stops_on_short(monkeypatch) -> None:
+    client = _client()
+    # 1200 positions across pages of 500 -> 500, 500, 200 (short page ends it).
+    all_pos = [make_position(wallet="0xw", condition_id=f"m{i}") for i in range(1200)]
+
+    def fake_get_positions(wallet, *, limit=500, offset=0):
+        return all_pos[offset : offset + limit]
+
+    monkeypatch.setattr(client, "get_positions", fake_get_positions)
+    result = client.get_all_positions("0xw", page_size=500)
+    assert len(result) == 1200
+
+
+def test_get_all_positions_respects_hard_cap(monkeypatch, caplog) -> None:
+    client = _client()
+
+    # An "infinite" source: every page is full, so pagination only stops at the cap.
+    def fake_get_positions(wallet, *, limit=500, offset=0):
+        return [make_position(wallet="0xw", condition_id=f"m{offset}-{i}") for i in range(limit)]
+
+    monkeypatch.setattr(client, "get_positions", fake_get_positions)
+    import logging
+
+    with caplog.at_level(logging.WARNING):
+        result = client.get_all_positions("0xw", page_size=500, hard_cap=2000)
+    assert len(result) == 2000  # capped
+    assert any("hard cap" in r.message.lower() for r in caplog.records)
+
+
+def test_get_all_activity_stops_at_empty_page(monkeypatch) -> None:
+    client = _client()
+    from conftest import make_trade
+
+    pages = {0: [make_trade(wallet="0xw", minute=i) for i in range(500)], 500: []}  # second page empty
+
+    def fake_get_activity(wallet, *, start=None, end=None, limit=500, offset=0, activity_type="TRADE"):
+        return pages.get(offset, [])
+
+    monkeypatch.setattr(client, "get_activity", fake_get_activity)
+    result = client.get_all_activity("0xw", page_size=500)
+    assert len(result) == 500

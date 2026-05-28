@@ -132,10 +132,10 @@ def score_wallet(
     start = int((now.timestamp()) - activity_lookback_days * 86400)
     end = int(now.timestamp())
 
-    positions = client.get_positions(wallet)
-    activity = client.get_activity(wallet, start=start, end=end)
+    positions = client.get_all_positions(wallet)
+    activity = client.get_all_activity(wallet, start=start, end=end)
     # Neg-risk conversions look like SELLs; fetch them so dumps aren't over-counted.
-    conversions = client.get_activity(wallet, start=start, end=end, activity_type="CONVERSION")
+    conversions = client.get_all_activity(wallet, start=start, end=end, activity_type="CONVERSION")
     neg_risk_condition_ids = _neg_risk_markets(client, conversions)
 
     return score_from_data(
