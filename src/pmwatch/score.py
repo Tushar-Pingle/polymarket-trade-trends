@@ -50,11 +50,16 @@ def score_from_data(
     activity: list[Trade],
     cfg: LeaderboardConfig,
     now: datetime | None = None,
+    conversions: list[Trade] | None = None,
+    neg_risk_condition_ids: set[str] | None = None,
 ) -> WalletScore:
     """Compute a wallet's score from already-fetched data (pure / testable).
 
     Kept free of any network I/O so it can be unit-tested with fixtures; the
     network-bound :func:`score_wallet` wraps it.
+
+    ``conversions`` and ``neg_risk_condition_ids`` let the dump detector exclude
+    genuine neg-risk conversions (which look like SELLs) from the dump penalty.
     """
     now = now or datetime.now(UTC)
     s = cfg.scoring
@@ -83,7 +88,12 @@ def score_from_data(
     roi = (total_pnl / total_invested) if total_invested > 0 else 0.0
 
     # Integrity penalty: each detected dump subtracts points and erodes trust.
-    dumps = detect_dumps(activity)
+    # Neg-risk conversions (passed in) are excluded so they aren't mistaken for dumps.
+    dumps = detect_dumps(
+        activity,
+        neg_risk_condition_ids=neg_risk_condition_ids or (),
+        conversions=conversions or (),
+    )
     dump_count = len(dumps)
     weighted_points += s.dump_penalty * dump_count
 
@@ -120,9 +130,13 @@ def score_wallet(
     """
     now = now or datetime.now(UTC)
     start = int((now.timestamp()) - activity_lookback_days * 86400)
+    end = int(now.timestamp())
 
     positions = client.get_positions(wallet)
-    activity = client.get_activity(wallet, start=start, end=int(now.timestamp()))
+    activity = client.get_activity(wallet, start=start, end=end)
+    # Neg-risk conversions look like SELLs; fetch them so dumps aren't over-counted.
+    conversions = client.get_activity(wallet, start=start, end=end, activity_type="CONVERSION")
+    neg_risk_condition_ids = _neg_risk_markets(client, conversions)
 
     return score_from_data(
         wallet=wallet,
@@ -131,4 +145,25 @@ def score_wallet(
         activity=activity,
         cfg=cfg,
         now=now,
+        conversions=conversions,
+        neg_risk_condition_ids=neg_risk_condition_ids,
     )
+
+
+def _neg_risk_markets(client: PolymarketClient, conversions: list[Trade]) -> set[str]:
+    """Of the markets a wallet converted on, which are actually neg-risk.
+
+    We only look up markets that appear in CONVERSION activity (a small set), so
+    this adds at most a handful of metadata calls per wallet rather than one per
+    traded market.
+    """
+    neg_risk: set[str] = set()
+    for condition_id in {c.condition_id for c in conversions if c.condition_id}:
+        try:
+            market = client.get_market(condition_id)
+        except Exception as exc:  # metadata is best-effort; never abort scoring
+            log.debug("Neg-risk lookup failed for %s: %s", condition_id, exc)
+            continue
+        if market and market.neg_risk:
+            neg_risk.add(condition_id)
+    return neg_risk

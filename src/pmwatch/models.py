@@ -176,6 +176,10 @@ class Market:
     closed: bool
     tags: list[str] = field(default_factory=list)
     end_date: datetime | None = None
+    # Neg-risk: in these markets a SELL of NO can be a conversion rather than an
+    # exit, which the dump detector must account for (see pmwatch.signals).
+    neg_risk: bool = False
+    enable_neg_risk: bool = False
 
     def price_of(self, outcome_index: int) -> float | None:
         """Current market price for an outcome index, or ``None`` if unknown."""
@@ -204,6 +208,8 @@ class Market:
             closed=bool(raw.get("closed", False)),
             tags=tags,
             end_date=_parse_iso(raw.get("endDate")),
+            neg_risk=bool(raw.get("negRisk", False)),
+            enable_neg_risk=bool(raw.get("enableNegRisk", False)),
         )
 
 
@@ -225,6 +231,8 @@ class Event:
     volume: float
     tags: list[str]  # lower-cased tag labels + slugs
     market_condition_ids: list[str]
+    neg_risk: bool = False
+    enable_neg_risk: bool = False
 
     @classmethod
     def from_api(cls, raw: dict[str, Any]) -> Event:
@@ -252,6 +260,8 @@ class Event:
             volume=float(raw.get("volume", 0) or 0),
             tags=tag_terms,
             market_condition_ids=condition_ids,
+            neg_risk=bool(raw.get("negRisk", False)),
+            enable_neg_risk=bool(raw.get("enableNegRisk", False)),
         )
 
 
