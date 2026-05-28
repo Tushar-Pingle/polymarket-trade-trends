@@ -16,7 +16,12 @@ api:
   gamma_base_url: "https://gamma-api.polymarket.com"
   timeout_seconds: 15          # per-request timeout
   max_retries: 4               # retries on network / 5xx / 429 (exponential backoff)
-  rate_limit_per_sec: 5.0      # shared across ALL workers via a token-bucket limiter
+  # Aggregate request budget across ALL worker processes on the host. Kept under
+  # the tightest Polymarket limit (/positions ~15 rps) with headroom for 4 workers.
+  rate_limit_per_sec: 12.0
+  # "file" = one token bucket shared across processes via an flock'd state file
+  # (correct for the systemd one-process-per-niche model). "memory" = per-process.
+  rate_limiter: "file"
 
 # ---------------------------------------------------------------------------
 # Discord delivery. The webhook URL itself lives in the environment (.env),

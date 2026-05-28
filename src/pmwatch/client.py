@@ -12,10 +12,12 @@ Everything this project needs is available without authentication:
 
 Design notes
 ------------
-* A **token-bucket rate limiter** is shared across every caller in the process
-  so that four niche workers polling concurrently never exceed the configured
-  requests/second. It is thread-safe because the watcher may run niches in
-  threads.
+* A **token-bucket rate limiter** caps the request rate. Two implementations:
+  :class:`RateLimiter` (in-memory, thread-safe — fine for a single process), and
+  :class:`FileLockRateLimiter` (shares one bucket across *processes* via an
+  flock'd state file — required for the systemd model, where each niche is its
+  own process and an in-memory limiter would let each one independently hit the
+  full rate).
 * Transient failures (network errors, HTTP 429/5xx) are retried with capped
   **exponential backoff**. ``Retry-After`` is honoured when present.
 * Responses are parsed into the typed models from :mod:`pmwatch.models` at this
@@ -24,9 +26,13 @@ Design notes
 
 from __future__ import annotations
 
+import fcntl
+import json
+import os
 import threading
 import time
-from typing import Any
+from pathlib import Path
+from typing import Any, Protocol
 
 import requests
 
@@ -37,13 +43,19 @@ from .models import Event, Market, Position, Trade
 log = get_logger(__name__)
 
 
+class Limiter(Protocol):
+    """Structural type for anything with a blocking ``acquire()``."""
+
+    def acquire(self) -> None: ...
+
+
 class RateLimiter:
     """A simple thread-safe token-bucket limiter.
 
     Tokens refill continuously at ``rate`` per second up to a small burst
     capacity. :meth:`acquire` blocks until a token is available. Sharing one
-    instance across all workers caps the *aggregate* request rate, which is what
-    the upstream API actually limits on.
+    instance across all workers in **one process** caps that process's request
+    rate. For the multi-process systemd model use :class:`FileLockRateLimiter`.
     """
 
     def __init__(self, rate_per_sec: float, burst: float | None = None) -> None:
@@ -70,14 +82,99 @@ class RateLimiter:
                 time.sleep(deficit / self._rate)
 
 
+class FileLockRateLimiter:
+    """Cross-process token-bucket limiter backed by an ``flock``'d JSON file.
+
+    The systemd deployment runs one ``pmwatch@<niche>`` process per niche, so an
+    in-memory limiter can't bound the *aggregate* host request rate — each
+    process would independently allow ``rate`` rps (the bug this fixes: 4
+    processes × 5 rps = 20 rps against a service we think we're hitting at 5).
+
+    This limiter keeps the bucket state in a small JSON file and guards every
+    read-modify-write with :func:`fcntl.flock`, so every process (and thread) on
+    the host draws from one shared bucket. Timestamps use wall-clock
+    :func:`time.time` (not ``monotonic``) because the value is shared across
+    processes. Same :meth:`acquire` interface as :class:`RateLimiter`.
+    """
+
+    def __init__(
+        self,
+        path: str | Path,
+        rate_per_sec: float,
+        *,
+        burst: float | None = None,
+        stale_seconds: float = 60.0,
+    ) -> None:
+        self._path = Path(path)
+        self._path.parent.mkdir(parents=True, exist_ok=True)
+        self._rate = max(rate_per_sec, 0.1)
+        self._capacity = burst if burst is not None else max(self._rate, 1.0)
+        # If the persisted state is older than this, treat it as stale and reset
+        # the bucket to full (guards against a crashed writer / long idle).
+        self._stale_seconds = stale_seconds
+
+    def acquire(self) -> None:
+        """Block until a shared token is available, then consume it."""
+        # We never sleep while holding the lock — release, wait, retry — so other
+        # processes can make progress (and also wait) in the meantime.
+        while True:
+            wait = self._try_consume()
+            if wait <= 0.0:
+                return
+            time.sleep(wait)
+
+    def _try_consume(self) -> float:
+        """Atomically refill + try to take a token. Returns seconds to wait (0 = got one)."""
+        fd = os.open(self._path, os.O_RDWR | os.O_CREAT, 0o644)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            now = time.time()
+            tokens, updated = self._read_state(fd, default_now=now)
+            elapsed = now - updated
+            if elapsed < 0 or elapsed > self._stale_seconds:
+                tokens = self._capacity  # clock skew or stale state -> reset full
+            else:
+                tokens = min(self._capacity, tokens + elapsed * self._rate)
+
+            if tokens >= 1.0:
+                tokens -= 1.0
+                self._write_state(fd, tokens, now)
+                return 0.0
+            # Not enough yet; persist the refilled state and report the wait.
+            deficit = 1.0 - tokens
+            self._write_state(fd, tokens, now)
+            return deficit / self._rate
+        finally:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+            os.close(fd)
+
+    def _read_state(self, fd: int, *, default_now: float) -> tuple[float, float]:
+        os.lseek(fd, 0, os.SEEK_SET)
+        raw = os.read(fd, 4096).decode("utf-8").strip()
+        if not raw:
+            return self._capacity, default_now
+        try:
+            data = json.loads(raw)
+            return float(data["tokens"]), float(data["updated"])
+        except (ValueError, KeyError, TypeError):
+            # Corrupt state -> reset to full as of now.
+            return self._capacity, default_now
+
+    def _write_state(self, fd: int, tokens: float, updated: float) -> None:
+        payload = json.dumps({"tokens": tokens, "updated": updated}).encode("utf-8")
+        os.lseek(fd, 0, os.SEEK_SET)
+        os.ftruncate(fd, 0)
+        os.write(fd, payload)
+
+
 class PolymarketClient:
     """Thin, typed wrapper over the Polymarket Data + Gamma REST APIs."""
 
-    def __init__(self, api: ApiConfig, *, rate_limiter: RateLimiter | None = None) -> None:
+    def __init__(self, api: ApiConfig, *, rate_limiter: Limiter | None = None) -> None:
         self._api = api
         # Allow an externally-supplied limiter so multiple clients can share one;
-        # otherwise create a private one from config.
-        self._limiter = rate_limiter or RateLimiter(api.rate_limit_per_sec)
+        # otherwise create a private in-memory one from config.
+        self._limiter: Limiter = rate_limiter or RateLimiter(api.rate_limit_per_sec)
         self._session = requests.Session()
         self._session.headers.update({"User-Agent": "pmwatch/0.1 (+read-only)"})
 
