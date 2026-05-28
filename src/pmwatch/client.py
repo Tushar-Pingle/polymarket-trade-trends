@@ -45,6 +45,13 @@ log = get_logger(__name__)
 
 T = TypeVar("T")
 
+# Server-side offset ceilings the Polymarket Data API enforces. Requesting a page
+# at or beyond these offsets returns HTTP 400, so we must stop *before* issuing
+# such a request rather than catch the 400 after the fact (a 400 also signals
+# genuinely bad params, which we don't want to swallow).
+_ACTIVITY_MAX_OFFSET = 3000  # /activity: "max historical activity offset of 3000"
+_POSITIONS_MAX_OFFSET = 10000  # /positions: OpenAPI offset maximum
+
 
 class Limiter(Protocol):
     """Structural type for anything with a blocking ``acquire()``."""
@@ -249,17 +256,19 @@ class PolymarketClient:
         raw = self._get(self._api.data_base_url, "/positions", params)
         return [Position.from_api(row) for row in _ensure_list(raw)]
 
-    def get_all_positions(self, wallet: str, *, page_size: int = 500, hard_cap: int = 5000) -> list[Position]:
-        """All of a wallet's positions, paging until exhausted (capped at ``hard_cap``).
+    def get_all_positions(self, wallet: str, *, page_size: int = 500, hard_cap: int = 10000) -> list[Position]:
+        """All of a wallet's positions, paging until exhausted.
 
         A whale can hold positions across more markets than a single page returns;
         the old single ``limit=500`` call silently truncated. Pages here until a
-        short page, then stops; if the cap is hit it logs a WARNING with the wallet.
+        short page, the server's offset ceiling (``/positions`` allows offset up to
+        10000), or our runaway ``hard_cap``.
         """
         return self._paginate_all(
             lambda lim, off: self.get_positions(wallet, limit=lim, offset=off),
             page_size=page_size,
             hard_cap=hard_cap,
+            server_max_offset=_POSITIONS_MAX_OFFSET,
             what="positions",
             wallet=wallet,
         )
@@ -297,13 +306,20 @@ class PolymarketClient:
         page_size: int = 500,
         hard_cap: int = 5000,
     ) -> list[Trade]:
-        """All of a wallet's activity in the window, paging until exhausted (capped)."""
+        """All of a wallet's activity in the window, paging until exhausted.
+
+        Stops at a short page, our runaway ``hard_cap``, or — most importantly —
+        the ``/activity`` server offset ceiling of 3000, beyond which the API
+        returns HTTP 400. Hitting that ceiling is expected for very active wallets
+        and is logged at INFO (not a defensive WARNING).
+        """
         return self._paginate_all(
             lambda lim, off: self.get_activity(
                 wallet, start=start, end=end, limit=lim, offset=off, activity_type=activity_type
             ),
             page_size=page_size,
             hard_cap=hard_cap,
+            server_max_offset=_ACTIVITY_MAX_OFFSET,
             what=f"activity[{activity_type}]",
             wallet=wallet,
         )
@@ -316,17 +332,28 @@ class PolymarketClient:
         hard_cap: int,
         what: str,
         wallet: str,
+        server_max_offset: int | None = None,
     ) -> list[T]:
-        """Page through ``fetch_page(limit, offset)`` until a short page or the cap.
+        """Page through ``fetch_page(limit, offset)`` until exhausted or a ceiling.
 
-        Stops when a page comes back shorter than ``page_size`` (no more data) or
-        when ``hard_cap`` rows have been collected (logged as a WARNING so capping
-        is never silent). The cap bounds runaway loops on pathological accounts.
+        Stopping conditions, checked *before* each request so we never issue a call
+        the server will reject:
+
+        * the API's documented ``server_max_offset`` — stopping here is expected
+          for very active accounts and is logged at INFO;
+        * our ``hard_cap`` runaway guard — logged at WARNING (shouldn't normally
+          happen); or
+        * a page shorter than ``page_size`` — no more data, logged nothing.
         """
         out: list[T] = []
         offset = 0
+        hit_server_ceiling = False
         capped = False
         while True:
+            # Server ceiling first: never request an offset the API will 400 on.
+            if server_max_offset is not None and offset >= server_max_offset:
+                hit_server_ceiling = True
+                break
             if offset >= hard_cap:
                 capped = True
                 break
@@ -336,7 +363,12 @@ class PolymarketClient:
                 break  # last page
             offset += page_size
 
-        if capped:
+        if hit_server_ceiling:
+            log.info(
+                "Reached API offset ceiling — older history not paged",
+                extra={"extra_fields": {"what": what, "wallet": wallet, "offset_ceiling": server_max_offset}},
+            )
+        elif capped:
             log.warning(
                 "Pagination hit hard cap — data truncated",
                 extra={"extra_fields": {"what": what, "wallet": wallet, "cap": hard_cap}},

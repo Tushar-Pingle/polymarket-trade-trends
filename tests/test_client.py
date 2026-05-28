@@ -109,3 +109,27 @@ def test_get_all_activity_stops_at_empty_page(monkeypatch) -> None:
     monkeypatch.setattr(client, "get_activity", fake_get_activity)
     result = client.get_all_activity("0xw", page_size=500)
     assert len(result) == 500
+
+
+def test_get_all_activity_stops_before_server_offset_ceiling(monkeypatch, caplog) -> None:
+    import logging
+
+    from conftest import make_trade
+
+    client = _client()
+
+    # Mimic the API: offset >= 3000 returns HTTP 400. If pagination ever requests
+    # such an offset, this raises and the test fails — proving we stop *before* it.
+    def fake_get_activity(wallet, *, start=None, end=None, limit=500, offset=0, activity_type="TRADE"):
+        if offset >= 3000:
+            raise RuntimeError("HTTP 400 for /activity: max historical activity offset of 3000 exceeded")
+        return [make_trade(wallet="0xw", minute=offset + i) for i in range(limit)]
+
+    monkeypatch.setattr(client, "get_activity", fake_get_activity)
+    with caplog.at_level(logging.INFO):
+        result = client.get_all_activity("0xw", page_size=500)  # must not raise
+
+    assert len(result) == 3000  # offsets 0..2500 inclusive (6 full pages)
+    ceiling_logs = [r for r in caplog.records if "offset ceiling" in r.message.lower()]
+    assert len(ceiling_logs) == 1  # logged once, at INFO
+    assert ceiling_logs[0].levelno == logging.INFO
