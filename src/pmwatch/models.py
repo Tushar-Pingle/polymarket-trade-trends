@@ -180,6 +180,14 @@ class Market:
     # exit, which the dump detector must account for (see pmwatch.signals).
     neg_risk: bool = False
     enable_neg_risk: bool = False
+    # Microstructure fields captured for Wave 2 (not yet used by alert logic).
+    last_trade_price: float = 0.0
+    best_bid: float = 0.0
+    best_ask: float = 0.0
+    spread: float = 0.0
+    one_day_price_change: float = 0.0
+    liquidity_clob: float = 0.0
+    volume_24hr: float = 0.0
 
     def price_of(self, outcome_index: int) -> float | None:
         """Current market price for an outcome index, or ``None`` if unknown."""
@@ -210,6 +218,13 @@ class Market:
             end_date=_parse_iso(raw.get("endDate")),
             neg_risk=bool(raw.get("negRisk", False)),
             enable_neg_risk=bool(raw.get("enableNegRisk", False)),
+            last_trade_price=float(raw.get("lastTradePrice", 0) or 0),
+            best_bid=float(raw.get("bestBid", 0) or 0),
+            best_ask=float(raw.get("bestAsk", 0) or 0),
+            spread=float(raw.get("spread", 0) or 0),
+            one_day_price_change=float(raw.get("oneDayPriceChange", 0) or 0),
+            liquidity_clob=float(raw.get("liquidityClob", 0) or 0),
+            volume_24hr=float(raw.get("volume24hr", 0) or 0),
         )
 
 
@@ -233,6 +248,14 @@ class Event:
     market_condition_ids: list[str]
     neg_risk: bool = False
     enable_neg_risk: bool = False
+    # Liquidity / interest fields captured for Wave 2 (not yet used by alert logic).
+    open_interest: float = 0.0
+    liquidity: float = 0.0
+    liquidity_clob: float = 0.0
+    volume_24hr: float = 0.0
+    volume_1wk: float = 0.0
+    competitive: float = 0.0
+    comment_count: int = 0
 
     @classmethod
     def from_api(cls, raw: dict[str, Any]) -> Event:
@@ -262,6 +285,13 @@ class Event:
             market_condition_ids=condition_ids,
             neg_risk=bool(raw.get("negRisk", False)),
             enable_neg_risk=bool(raw.get("enableNegRisk", False)),
+            open_interest=float(raw.get("openInterest", 0) or 0),
+            liquidity=float(raw.get("liquidity", 0) or 0),
+            liquidity_clob=float(raw.get("liquidityClob", 0) or 0),
+            volume_24hr=float(raw.get("volume24hr", 0) or 0),
+            volume_1wk=float(raw.get("volume1wk", 0) or 0),
+            competitive=float(raw.get("competitive", 0) or 0),
+            comment_count=int(raw.get("commentCount", 0) or 0),
         )
 
 

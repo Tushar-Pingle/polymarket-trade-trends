@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
-from pmwatch.models import Position, Side, Trade
+from pmwatch.models import Event, Market, Position, Side, Trade
 
 
 def test_trade_parses_unix_timestamp() -> None:
@@ -65,3 +65,83 @@ def test_position_tolerates_missing_or_bad_end_date() -> None:
 def test_position_parses_numeric_string_end_date() -> None:
     pos = Position.from_api({"proxyWallet": "0x1", "conditionId": "0xm", "endDate": "1730808000"})
     assert pos.end_date == datetime.fromtimestamp(1730808000, tz=UTC)
+
+
+# --------------------------------------------------------------------------- #
+# Neg-risk + Wave-2 fields
+# --------------------------------------------------------------------------- #
+def test_market_parses_negrisk_and_microstructure_fields() -> None:
+    raw = {
+        "conditionId": "0xm",
+        "question": "Q?",
+        "outcomes": ["Yes", "No"],
+        "outcomePrices": ["0.6", "0.4"],
+        "negRisk": True,
+        "enableNegRisk": True,
+        "lastTradePrice": 0.61,
+        "bestBid": 0.60,
+        "bestAsk": 0.62,
+        "spread": 0.02,
+        "oneDayPriceChange": -0.03,
+        "liquidityClob": 12345.6,
+        "volume24hr": 7890.1,
+    }
+    m = Market.from_api(raw)
+    assert m.neg_risk is True and m.enable_neg_risk is True
+    assert m.last_trade_price == 0.61
+    assert m.best_bid == 0.60 and m.best_ask == 0.62
+    assert m.spread == 0.02
+    assert m.one_day_price_change == -0.03
+    assert m.liquidity_clob == 12345.6
+    assert m.volume_24hr == 7890.1
+
+
+def test_market_fields_default_when_missing() -> None:
+    m = Market.from_api({"conditionId": "0xm", "question": "Q?"})
+    assert m.neg_risk is False and m.enable_neg_risk is False
+    assert m.last_trade_price == 0.0
+    assert m.best_bid == 0.0 and m.best_ask == 0.0
+    assert m.spread == 0.0
+    assert m.one_day_price_change == 0.0
+    assert m.liquidity_clob == 0.0
+    assert m.volume_24hr == 0.0
+
+
+def test_event_parses_negrisk_and_liquidity_fields() -> None:
+    raw = {
+        "id": "e1",
+        "title": "An event",
+        "slug": "an-event",
+        "volume": 1000.0,
+        "tags": [{"label": "Politics", "slug": "politics"}],
+        "markets": [{"conditionId": "0xm"}],
+        "negRisk": True,
+        "enableNegRisk": True,
+        "openInterest": 5000.0,
+        "liquidity": 2000.0,
+        "liquidityClob": 1500.0,
+        "volume24hr": 300.0,
+        "volume1wk": 900.0,
+        "competitive": 0.87,
+        "commentCount": 42,
+    }
+    e = Event.from_api(raw)
+    assert e.neg_risk is True and e.enable_neg_risk is True
+    assert e.open_interest == 5000.0
+    assert e.liquidity == 2000.0 and e.liquidity_clob == 1500.0
+    assert e.volume_24hr == 300.0 and e.volume_1wk == 900.0
+    assert e.competitive == 0.87
+    assert e.comment_count == 42
+    # Existing parsing still works.
+    assert e.tags == ["politics", "politics"]  # label + slug, lower-cased
+    assert e.market_condition_ids == ["0xm"]
+
+
+def test_event_fields_default_when_missing() -> None:
+    e = Event.from_api({"id": "e1", "title": "x", "markets": [], "tags": []})
+    assert e.neg_risk is False and e.enable_neg_risk is False
+    assert e.open_interest == 0.0
+    assert e.liquidity == 0.0 and e.liquidity_clob == 0.0
+    assert e.volume_24hr == 0.0 and e.volume_1wk == 0.0
+    assert e.competitive == 0.0
+    assert e.comment_count == 0
