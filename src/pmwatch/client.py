@@ -12,10 +12,12 @@ Everything this project needs is available without authentication:
 
 Design notes
 ------------
-* A **token-bucket rate limiter** is shared across every caller in the process
-  so that four niche workers polling concurrently never exceed the configured
-  requests/second. It is thread-safe because the watcher may run niches in
-  threads.
+* A **token-bucket rate limiter** caps the request rate. Two implementations:
+  :class:`RateLimiter` (in-memory, thread-safe — fine for a single process), and
+  :class:`FileLockRateLimiter` (shares one bucket across *processes* via an
+  flock'd state file — required for the systemd model, where each niche is its
+  own process and an in-memory limiter would let each one independently hit the
+  full rate).
 * Transient failures (network errors, HTTP 429/5xx) are retried with capped
   **exponential backoff**. ``Retry-After`` is honoured when present.
 * Responses are parsed into the typed models from :mod:`pmwatch.models` at this
@@ -24,9 +26,14 @@ Design notes
 
 from __future__ import annotations
 
+import fcntl
+import json
+import os
 import threading
 import time
-from typing import Any
+from collections.abc import Callable
+from pathlib import Path
+from typing import Any, Protocol, TypeVar
 
 import requests
 
@@ -36,14 +43,29 @@ from .models import Event, Market, Position, Trade
 
 log = get_logger(__name__)
 
+T = TypeVar("T")
+
+# Server-side offset ceilings the Polymarket Data API enforces. Requesting a page
+# at or beyond these offsets returns HTTP 400, so we must stop *before* issuing
+# such a request rather than catch the 400 after the fact (a 400 also signals
+# genuinely bad params, which we don't want to swallow).
+_ACTIVITY_MAX_OFFSET = 3000  # /activity: "max historical activity offset of 3000"
+_POSITIONS_MAX_OFFSET = 10000  # /positions: OpenAPI offset maximum
+
+
+class Limiter(Protocol):
+    """Structural type for anything with a blocking ``acquire()``."""
+
+    def acquire(self) -> None: ...
+
 
 class RateLimiter:
     """A simple thread-safe token-bucket limiter.
 
     Tokens refill continuously at ``rate`` per second up to a small burst
     capacity. :meth:`acquire` blocks until a token is available. Sharing one
-    instance across all workers caps the *aggregate* request rate, which is what
-    the upstream API actually limits on.
+    instance across all workers in **one process** caps that process's request
+    rate. For the multi-process systemd model use :class:`FileLockRateLimiter`.
     """
 
     def __init__(self, rate_per_sec: float, burst: float | None = None) -> None:
@@ -70,14 +92,99 @@ class RateLimiter:
                 time.sleep(deficit / self._rate)
 
 
+class FileLockRateLimiter:
+    """Cross-process token-bucket limiter backed by an ``flock``'d JSON file.
+
+    The systemd deployment runs one ``pmwatch@<niche>`` process per niche, so an
+    in-memory limiter can't bound the *aggregate* host request rate — each
+    process would independently allow ``rate`` rps (the bug this fixes: 4
+    processes × 5 rps = 20 rps against a service we think we're hitting at 5).
+
+    This limiter keeps the bucket state in a small JSON file and guards every
+    read-modify-write with :func:`fcntl.flock`, so every process (and thread) on
+    the host draws from one shared bucket. Timestamps use wall-clock
+    :func:`time.time` (not ``monotonic``) because the value is shared across
+    processes. Same :meth:`acquire` interface as :class:`RateLimiter`.
+    """
+
+    def __init__(
+        self,
+        path: str | Path,
+        rate_per_sec: float,
+        *,
+        burst: float | None = None,
+        stale_seconds: float = 60.0,
+    ) -> None:
+        self._path = Path(path)
+        self._path.parent.mkdir(parents=True, exist_ok=True)
+        self._rate = max(rate_per_sec, 0.1)
+        self._capacity = burst if burst is not None else max(self._rate, 1.0)
+        # If the persisted state is older than this, treat it as stale and reset
+        # the bucket to full (guards against a crashed writer / long idle).
+        self._stale_seconds = stale_seconds
+
+    def acquire(self) -> None:
+        """Block until a shared token is available, then consume it."""
+        # We never sleep while holding the lock — release, wait, retry — so other
+        # processes can make progress (and also wait) in the meantime.
+        while True:
+            wait = self._try_consume()
+            if wait <= 0.0:
+                return
+            time.sleep(wait)
+
+    def _try_consume(self) -> float:
+        """Atomically refill + try to take a token. Returns seconds to wait (0 = got one)."""
+        fd = os.open(self._path, os.O_RDWR | os.O_CREAT, 0o644)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            now = time.time()
+            tokens, updated = self._read_state(fd, default_now=now)
+            elapsed = now - updated
+            if elapsed < 0 or elapsed > self._stale_seconds:
+                tokens = self._capacity  # clock skew or stale state -> reset full
+            else:
+                tokens = min(self._capacity, tokens + elapsed * self._rate)
+
+            if tokens >= 1.0:
+                tokens -= 1.0
+                self._write_state(fd, tokens, now)
+                return 0.0
+            # Not enough yet; persist the refilled state and report the wait.
+            deficit = 1.0 - tokens
+            self._write_state(fd, tokens, now)
+            return deficit / self._rate
+        finally:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+            os.close(fd)
+
+    def _read_state(self, fd: int, *, default_now: float) -> tuple[float, float]:
+        os.lseek(fd, 0, os.SEEK_SET)
+        raw = os.read(fd, 4096).decode("utf-8").strip()
+        if not raw:
+            return self._capacity, default_now
+        try:
+            data = json.loads(raw)
+            return float(data["tokens"]), float(data["updated"])
+        except (ValueError, KeyError, TypeError):
+            # Corrupt state -> reset to full as of now.
+            return self._capacity, default_now
+
+    def _write_state(self, fd: int, tokens: float, updated: float) -> None:
+        payload = json.dumps({"tokens": tokens, "updated": updated}).encode("utf-8")
+        os.lseek(fd, 0, os.SEEK_SET)
+        os.ftruncate(fd, 0)
+        os.write(fd, payload)
+
+
 class PolymarketClient:
     """Thin, typed wrapper over the Polymarket Data + Gamma REST APIs."""
 
-    def __init__(self, api: ApiConfig, *, rate_limiter: RateLimiter | None = None) -> None:
+    def __init__(self, api: ApiConfig, *, rate_limiter: Limiter | None = None) -> None:
         self._api = api
         # Allow an externally-supplied limiter so multiple clients can share one;
-        # otherwise create a private one from config.
-        self._limiter = rate_limiter or RateLimiter(api.rate_limit_per_sec)
+        # otherwise create a private in-memory one from config.
+        self._limiter: Limiter = rate_limiter or RateLimiter(api.rate_limit_per_sec)
         self._session = requests.Session()
         self._session.headers.update({"User-Agent": "pmwatch/0.1 (+read-only)"})
 
@@ -139,14 +246,32 @@ class PolymarketClient:
         raw = self._get(self._api.data_base_url, "/trades", params)
         return [Trade.from_api(row) for row in _ensure_list(raw)]
 
-    def get_positions(self, wallet: str, *, limit: int = 500) -> list[Position]:
-        """All positions for a wallet (open + redeemable), used for scoring.
+    def get_positions(self, wallet: str, *, limit: int = 500, offset: int = 0) -> list[Position]:
+        """One page of a wallet's positions (open + redeemable), used for scoring.
 
-        ``GET /positions?user=<wallet>&limit=<n>``.
+        ``GET /positions?user=<wallet>&limit=<n>&offset=<o>``. For complete data
+        use :meth:`get_all_positions`, which pages until exhausted.
         """
-        params = {"user": wallet, "limit": limit, "sortBy": "CASHPNL"}
+        params = {"user": wallet, "limit": limit, "offset": offset, "sortBy": "CASHPNL"}
         raw = self._get(self._api.data_base_url, "/positions", params)
         return [Position.from_api(row) for row in _ensure_list(raw)]
+
+    def get_all_positions(self, wallet: str, *, page_size: int = 500, hard_cap: int = 10000) -> list[Position]:
+        """All of a wallet's positions, paging until exhausted.
+
+        A whale can hold positions across more markets than a single page returns;
+        the old single ``limit=500`` call silently truncated. Pages here until a
+        short page, the server's offset ceiling (``/positions`` allows offset up to
+        10000), or our runaway ``hard_cap``.
+        """
+        return self._paginate_all(
+            lambda lim, off: self.get_positions(wallet, limit=lim, offset=off),
+            page_size=page_size,
+            hard_cap=hard_cap,
+            server_max_offset=_POSITIONS_MAX_OFFSET,
+            what="positions",
+            wallet=wallet,
+        )
 
     def get_activity(
         self,
@@ -155,20 +280,100 @@ class PolymarketClient:
         start: int | None = None,
         end: int | None = None,
         limit: int = 500,
+        offset: int = 0,
         activity_type: str = "TRADE",
     ) -> list[Trade]:
-        """Time-bounded on-chain activity for a wallet (used for backtest/scoring).
+        """One page of time-bounded on-chain activity for a wallet.
 
-        ``GET /activity?user=<wallet>&type=TRADE&start=<unix>&end=<unix>``.
-        Trade-type activity maps onto the same :class:`Trade` model.
+        ``GET /activity?user=<wallet>&type=<t>&start=<unix>&end=<unix>&offset=<o>``.
+        For complete data use :meth:`get_all_activity`.
         """
-        params: dict[str, Any] = {"user": wallet, "limit": limit, "type": activity_type}
+        params: dict[str, Any] = {"user": wallet, "limit": limit, "offset": offset, "type": activity_type}
         if start is not None:
             params["start"] = start
         if end is not None:
             params["end"] = end
         raw = self._get(self._api.data_base_url, "/activity", params)
         return [Trade.from_api(row) for row in _ensure_list(raw)]
+
+    def get_all_activity(
+        self,
+        wallet: str,
+        *,
+        start: int | None = None,
+        end: int | None = None,
+        activity_type: str = "TRADE",
+        page_size: int = 500,
+        hard_cap: int = 5000,
+    ) -> list[Trade]:
+        """All of a wallet's activity in the window, paging until exhausted.
+
+        Stops at a short page, our runaway ``hard_cap``, or — most importantly —
+        the ``/activity`` server offset ceiling of 3000, beyond which the API
+        returns HTTP 400. Hitting that ceiling is expected for very active wallets
+        and is logged at INFO (not a defensive WARNING).
+        """
+        return self._paginate_all(
+            lambda lim, off: self.get_activity(
+                wallet, start=start, end=end, limit=lim, offset=off, activity_type=activity_type
+            ),
+            page_size=page_size,
+            hard_cap=hard_cap,
+            server_max_offset=_ACTIVITY_MAX_OFFSET,
+            what=f"activity[{activity_type}]",
+            wallet=wallet,
+        )
+
+    def _paginate_all(
+        self,
+        fetch_page: Callable[[int, int], list[T]],
+        *,
+        page_size: int,
+        hard_cap: int,
+        what: str,
+        wallet: str,
+        server_max_offset: int | None = None,
+    ) -> list[T]:
+        """Page through ``fetch_page(limit, offset)`` until exhausted or a ceiling.
+
+        Stopping conditions, checked *before* each request so we never issue a call
+        the server will reject:
+
+        * the API's documented ``server_max_offset`` — stopping here is expected
+          for very active accounts and is logged at INFO;
+        * our ``hard_cap`` runaway guard — logged at WARNING (shouldn't normally
+          happen); or
+        * a page shorter than ``page_size`` — no more data, logged nothing.
+        """
+        out: list[T] = []
+        offset = 0
+        hit_server_ceiling = False
+        capped = False
+        while True:
+            # Server ceiling first: never request an offset the API will 400 on.
+            if server_max_offset is not None and offset >= server_max_offset:
+                hit_server_ceiling = True
+                break
+            if offset >= hard_cap:
+                capped = True
+                break
+            page = fetch_page(page_size, offset)
+            out.extend(page)
+            if len(page) < page_size:
+                break  # last page
+            offset += page_size
+
+        if hit_server_ceiling:
+            log.info(
+                "Reached API offset ceiling — older history not paged",
+                extra={"extra_fields": {"what": what, "wallet": wallet, "offset_ceiling": server_max_offset}},
+            )
+        elif capped:
+            log.warning(
+                "Pagination hit hard cap — data truncated",
+                extra={"extra_fields": {"what": what, "wallet": wallet, "cap": hard_cap}},
+            )
+        return out[:hard_cap]
 
     def get_holders(self, condition_id: str, *, limit: int = 50) -> list[str]:
         """Top holder wallet addresses for a market (candidate discovery).

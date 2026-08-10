@@ -30,9 +30,10 @@ import signal
 import sys
 import threading
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 from . import backtest as backtest_mod
-from .client import PolymarketClient, RateLimiter
+from .client import FileLockRateLimiter, Limiter, PolymarketClient, RateLimiter
 from .config import Config, ConfigError, load_config
 from .discord import DiscordNotifier
 from .discover import discover_candidates
@@ -53,8 +54,14 @@ class App:
 
     def __init__(self, cfg: Config, *, dry_run: bool) -> None:
         self.cfg = cfg
-        # One shared rate limiter so concurrent niche workers respect one budget.
-        limiter = RateLimiter(cfg.api.rate_limit_per_sec)
+        # Rate limiter: "file" shares one bucket across all worker processes on
+        # the host (correct for systemd); "memory" is per-process.
+        limiter: Limiter
+        if cfg.api.rate_limiter == "file":
+            state_path = Path(cfg.storage.sqlite_path).parent / "ratelimit.json"
+            limiter = FileLockRateLimiter(state_path, cfg.api.rate_limit_per_sec)
+        else:
+            limiter = RateLimiter(cfg.api.rate_limit_per_sec)
         self.client = PolymarketClient(cfg.api, rate_limiter=limiter)
         self.ledger = Ledger(cfg.storage.data_dir)
         self.notifier = DiscordNotifier(cfg, dry_run=dry_run)

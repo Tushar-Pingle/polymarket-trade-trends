@@ -25,6 +25,7 @@ exotic structures, but it won't falsely punish a buy-and-hold winner.
 from __future__ import annotations
 
 from collections import defaultdict
+from collections.abc import Iterable
 from dataclasses import dataclass
 
 from .models import Side, Trade
@@ -54,7 +55,14 @@ class DumpEvent:
         return self.avg_sell_price - self.avg_buy_price
 
 
-def detect_dumps(trades: list[Trade], *, dump_fraction: float = 0.5) -> list[DumpEvent]:
+def detect_dumps(
+    trades: list[Trade],
+    *,
+    dump_fraction: float = 0.5,
+    neg_risk_condition_ids: Iterable[str] = (),
+    conversions: Iterable[Trade] = (),
+    conversion_window_seconds: float = 3600.0,
+) -> list[DumpEvent]:
     """Find pre-resolution dumps in a wallet's trade history.
 
     Parameters
@@ -63,11 +71,30 @@ def detect_dumps(trades: list[Trade], *, dump_fraction: float = 0.5) -> list[Dum
         All trade-type activity for one wallet (any order).
     dump_fraction:
         Minimum sold/bought ratio for a round-trip to count as a dump.
+    neg_risk_condition_ids:
+        Condition ids of markets that belong to **neg-risk** events. In a
+        neg-risk event, selling NO on one outcome is economically a conversion
+        into YES on the others (via the Neg Risk Adapter), so a SELL there is not
+        necessarily a real exit. Only markets in this set are eligible for the
+        conversion-based exclusion below.
+    conversions:
+        The wallet's ``CONVERSION``-type activity (parsed as :class:`Trade`).
+        Used to tell a genuine neg-risk conversion apart from a real dump.
+    conversion_window_seconds:
+        How close (in time) a CONVERSION must be to a market's last SELL for the
+        round-trip on that market to be treated as a conversion rather than a dump.
 
     Returns
     -------
     A list of :class:`DumpEvent`, one per offending market+outcome.
     """
+    neg_risk = {cid for cid in neg_risk_condition_ids if cid}
+    # Index conversion timestamps by the market they touched, for fast lookup.
+    conv_ts_by_cid: dict[str, list[float]] = defaultdict(list)
+    for conv in conversions:
+        if conv.condition_id:
+            conv_ts_by_cid[conv.condition_id].append(conv.timestamp.timestamp())
+
     # Group fills by the specific outcome token within a market.
     groups: dict[tuple[str, int], list[Trade]] = defaultdict(list)
     for trade in trades:
@@ -90,6 +117,13 @@ def detect_dumps(trades: list[Trade], *, dump_fraction: float = 0.5) -> list[Dum
         if last_sell <= first_buy:
             continue  # sells must come after the initial build
 
+        # Neg-risk exclusion: if this is a neg-risk market and the wallet did a
+        # CONVERSION on it close to the sell, the SELL is a conversion, not a dump.
+        if condition_id in neg_risk and _has_conversion_near(
+            conv_ts_by_cid.get(condition_id, ()), last_sell, conversion_window_seconds
+        ):
+            continue
+
         dumps.append(
             DumpEvent(
                 condition_id=condition_id,
@@ -103,6 +137,11 @@ def detect_dumps(trades: list[Trade], *, dump_fraction: float = 0.5) -> list[Dum
             )
         )
     return dumps
+
+
+def _has_conversion_near(timestamps: Iterable[float], target_ts: float, window_seconds: float) -> bool:
+    """True if any conversion timestamp is within ``window_seconds`` of ``target_ts``."""
+    return any(abs(ts - target_ts) <= window_seconds for ts in timestamps)
 
 
 def trust_score(dump_count: int, resolved_count: int) -> float:

@@ -69,6 +69,7 @@ class ApiConfig:
     timeout_seconds: float
     max_retries: int
     rate_limit_per_sec: float
+    rate_limiter: str  # "file" (cross-process) or "memory" (single-process)
 
 
 @dataclass(frozen=True)
@@ -256,12 +257,16 @@ def load_config(path: str | Path = "config.yaml", *, load_env: bool = True) -> C
 # Section parsers (kept separate for readability and targeted error messages).
 # --------------------------------------------------------------------------- #
 def _parse_api(raw: dict[str, Any]) -> ApiConfig:
+    rate_limiter = str(raw.get("rate_limiter", "file")).lower()
+    if rate_limiter not in {"file", "memory"}:
+        raise ConfigError(f"api.rate_limiter must be 'file' or 'memory', got {rate_limiter!r}")
     return ApiConfig(
         data_base_url=_as_str(_require(raw, "data_base_url", "api"), "api.data_base_url").rstrip("/"),
         gamma_base_url=_as_str(_require(raw, "gamma_base_url", "api"), "api.gamma_base_url").rstrip("/"),
         timeout_seconds=_as_float(raw.get("timeout_seconds", 15), "api.timeout_seconds"),
         max_retries=_as_int(raw.get("max_retries", 4), "api.max_retries"),
-        rate_limit_per_sec=_as_float(raw.get("rate_limit_per_sec", 5), "api.rate_limit_per_sec"),
+        rate_limit_per_sec=_as_float(raw.get("rate_limit_per_sec", 12), "api.rate_limit_per_sec"),
+        rate_limiter=rate_limiter,
     )
 
 

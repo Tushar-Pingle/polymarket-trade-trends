@@ -120,18 +120,31 @@ class FakeClient:
         markets: list[Market] | None = None,
         holders: dict[str, list[str]] | None = None,
         events: list[Event] | None = None,
+        conversions: dict[str, list[Trade]] | None = None,
     ) -> None:
         self._positions = positions or {}
         self._activity = activity or {}
         self._markets = markets or []
         self._holders = holders or {}
         self._events = events or []
+        self._conversions = conversions or {}
 
-    def get_positions(self, wallet: str, *, limit: int = 500) -> list[Position]:
+    def get_positions(self, wallet: str, *, limit: int = 500, offset: int = 0) -> list[Position]:
         return list(self._positions.get(wallet.lower(), []))
 
-    def get_activity(self, wallet: str, *, start=None, end=None, limit=500, activity_type="TRADE") -> list[Trade]:
-        return list(self._activity.get(wallet.lower(), []))
+    def get_all_positions(self, wallet: str, *, page_size: int = 500, hard_cap: int = 5000) -> list[Position]:
+        return self.get_positions(wallet)
+
+    def get_activity(
+        self, wallet: str, *, start=None, end=None, limit=500, offset=0, activity_type="TRADE"
+    ) -> list[Trade]:
+        source = self._conversions if activity_type == "CONVERSION" else self._activity
+        return list(source.get(wallet.lower(), []))
+
+    def get_all_activity(
+        self, wallet: str, *, start=None, end=None, activity_type="TRADE", page_size: int = 500, hard_cap: int = 5000
+    ) -> list[Trade]:
+        return self.get_activity(wallet, activity_type=activity_type)
 
     def get_top_markets(self, *, limit: int = 100, closed: bool = False) -> list[Market]:
         return list(self._markets)

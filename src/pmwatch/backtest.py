@@ -74,7 +74,7 @@ def backtest_niche(
     trades: list[Trade] = []
     for wallet in wallets:
         try:
-            activity = client.get_activity(wallet, start=start_ts, end=end_ts, activity_type="TRADE")
+            activity = client.get_all_activity(wallet, start=start_ts, end=end_ts, activity_type="TRADE")
         except Exception as exc:
             log.warning("Activity fetch failed for %s: %s", wallet, exc)
             continue
